@@ -1,0 +1,12 @@
+.functor logVPT(number, symbol, number, symbol):number
+
+.decl VarPointsTo(?hctx:symbol, ?value:symbol, ?ctx:number, ?var:symbol)
+.input VarPointsTo(IO="file", filename="VarPointsTo.csv", delimiter="\t")
+
+.decl FunctorOut(?out:symbol)
+.output FunctorOut
+
+FunctorOut(?value):-
+  VarPointsTo(_, ?value, ?ctx, ?var),
+  ?resNum = @logVPT(0, ?value, ?ctx, ?var),
+  ?resNum = 0.
