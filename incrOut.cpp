@@ -14,38 +14,79 @@ using std::string;
 using std::to_string;
 
 #define BUFFER_SIZE 4096
-
-void initFile();
-
-static pthread_mutex_t count_mutex = PTHREAD_MUTEX_INITIALIZER;
-static ofstream* vptFile = NULL;
-static int numOfThreads = 0;
+#define MAX_NUM_OF_THREADS 32
 
 class BufferedWriter{
   public:  
     char buffer[BUFFER_SIZE];
+    string outFileName;
     int charsInBuffer = 0;
-    ofstream* outStream = NULL;
+    ofstream** outStreamPtr;
+    pthread_mutex_t* myMutex;
+    BufferedWriter** otherBuffersSameFile;
     int disabled = 0;
 
-    ~BufferedWriter();
+    BufferedWriter(pthread_mutex_t* mut, ofstream** streamPtr, string fileName, BufferedWriter** bufferArr){
+    	cout << "MY CONSTRUCTOR FROM " <<  std::this_thread::get_id() << endl;
+    	myMutex = mut;
+    	outStreamPtr = streamPtr;
+    	outFileName = fileName;
+    	otherBuffersSameFile = bufferArr;
+    	initFile();
+    }
+
+    ~BufferedWriter(){
+		pthread_mutex_lock(myMutex);
+		cout << "MYDESTRUCTOR FROM " <<  std::this_thread::get_id() << endl;
+		//cout << "Numofthreads " << numOfThreads << endl;
+		
+		flush();
+		for(int i=0; i < MAX_NUM_OF_THREADS; i++)
+			if(otherBuffersSameFile[i]!=NULL)
+				otherBuffersSameFile[i]->flush();
+		
+		//if(--numOfThreads == 0)
+		(*outStreamPtr)->close();
+		
+		pthread_mutex_unlock(myMutex);
+	}
+
+	void initFile(){
+		pthread_mutex_lock(myMutex);
+		if(*outStreamPtr == NULL){
+			char* outFolder = getenv("ANALYSIS_OUT");
+			if(outFolder == NULL)
+				cout << "ANALYSIS_OUT env variable doesn't exist" << endl;
+			string outFile = outFolder + outFileName; 
+			cout << "OPENED FILE " << outFile << endl;
+			*outStreamPtr = new ofstream();
+			(*outStreamPtr)->open(outFile);
+			//numOfThreads = 1;
+			otherBuffersSameFile[0] = this;
+		}
+		else{
+			for(int i=0; i < MAX_NUM_OF_THREADS; i++){
+				if(otherBuffersSameFile[i]!=NULL){
+					continue;
+				}
+				else{
+					otherBuffersSameFile[i] = this;
+					break;
+				}
+			}
+		}
+		pthread_mutex_unlock(myMutex);	
+    }
 
     void flush(){
-    	if(charsInBuffer != 0 && outStream != NULL)
-    		outStream->write(buffer, charsInBuffer);
+    	if(charsInBuffer != 0 && *outStreamPtr != NULL)
+    		(*outStreamPtr)->write(buffer, charsInBuffer);
     	charsInBuffer=0;
     }
 
     void addString(string content){
     	if(disabled)
     		return;
-        if(outStream == NULL){
-            initFile();
-            if(vptFile == NULL)
-                disabled = 1;
-            else
-            	outStream = vptFile;
-        }
         int stringLen = content.length();
         if(charsInBuffer + stringLen < BUFFER_SIZE){
         	//cout << "APPENDING TO BUFFER FROM "<< std::this_thread::get_id() <<endl;
@@ -53,61 +94,31 @@ class BufferedWriter{
         	charsInBuffer += stringLen;
         }
         else{
-        	pthread_mutex_lock(&count_mutex);
+        	pthread_mutex_lock(myMutex);
         	//cout << "EMPTYING BUFFER FROM "<< std::this_thread::get_id() <<endl;
-        	outStream->write(buffer, charsInBuffer);
-        	outStream->write(content.c_str(), stringLen);
+        	(*outStreamPtr)->write(buffer, charsInBuffer);
+        	(*outStreamPtr)->write(content.c_str(), stringLen);
         	buffer[0] = '\0';
         	charsInBuffer = 0;
-        	pthread_mutex_unlock(&count_mutex);
+        	pthread_mutex_unlock(myMutex);
         }
         //cout << content;
     }
 };
 
-thread_local static BufferedWriter myBuffer;
-static BufferedWriter* bufferArr[32];
-
-void initFile(){
-	pthread_mutex_lock(&count_mutex);
-	if(vptFile == NULL){
-		char* outFolder = getenv("ANALYSIS_OUT");
-		if(outFolder == NULL)
-			cout << "ANALYSIS_OUT env variable doesn't exist" << endl;
-		string outFile = outFolder + string("/liveVPT.csv"); 
-		cout << "OPENED FILE " << outFile << endl;
-		vptFile = new ofstream();
-		vptFile->open(outFile);
-		numOfThreads = 1;
-		bufferArr[0] = &myBuffer;
-	}
-	else{
-		bufferArr[numOfThreads] = &myBuffer;
-		numOfThreads++;
-	}
-	pthread_mutex_unlock(&count_mutex);
-}
-
-BufferedWriter::~BufferedWriter(){
-	pthread_mutex_lock(&count_mutex);
-	cout << "MYDESTRUCTOR FROM " <<  std::this_thread::get_id() << endl;
-	cout << "Numofthreads " << numOfThreads << endl;
-	
-	flush();
-	for(int i=0; i<numOfThreads; i++)
-		bufferArr[i]->flush();
-	
-	//if(--numOfThreads == 0)
-	outStream->close();
-	
-	pthread_mutex_unlock(&count_mutex);
-}
+static pthread_mutex_t vpt_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t cge_mutex = PTHREAD_MUTEX_INITIALIZER;
+static ofstream* vptFile = NULL;
+static ofstream* cgeFile = NULL;
+static int numOfThreads = 0;
+static BufferedWriter* vptBufferArray[MAX_NUM_OF_THREADS];
+thread_local static BufferedWriter vptBuffer(&vpt_mutex, &vptFile, "/liveVPT.csv", vptBufferArray);
 
 extern "C" {
 
 	int32_t logVPT(int32_t hctx, const char *val, int32_t ctx, const char *var) {
 		string stringToAppend = to_string(hctx) + "\t" + val + "\t" + to_string(ctx) + "\t" + var + "\n";
-		myBuffer.addString(stringToAppend);
+		vptBuffer.addString(stringToAppend);
 		return 0;
 	}
 
