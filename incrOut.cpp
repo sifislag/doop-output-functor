@@ -19,20 +19,20 @@ using std::to_string;
 class BufferedWriter{
   public:  
     char buffer[BUFFER_SIZE];
-    string outFileName;
     int charsInBuffer = 0;
+    //string outFileName;
     ofstream** outStreamPtr;
     pthread_mutex_t* myMutex;
     BufferedWriter** otherBuffersSameFile;
-    int disabled = 0;
+    int disabled;
 
     BufferedWriter(pthread_mutex_t* mut, ofstream** streamPtr, string fileName, BufferedWriter** bufferArr){
     	cout << "MY CONSTRUCTOR FROM " <<  std::this_thread::get_id() << endl;
+    	disabled = 1;
     	myMutex = mut;
     	outStreamPtr = streamPtr;
-    	outFileName = fileName;
     	otherBuffersSameFile = bufferArr;
-    	initFile();
+    	initFile(fileName);
     }
 
     ~BufferedWriter(){
@@ -51,13 +51,17 @@ class BufferedWriter{
 		pthread_mutex_unlock(myMutex);
 	}
 
-	void initFile(){
+	void initFile(string fileName){
 		pthread_mutex_lock(myMutex);
 		if(*outStreamPtr == NULL){
 			char* outFolder = getenv("ANALYSIS_OUT");
-			if(outFolder == NULL)
+			if(outFolder == NULL){
 				cout << "ANALYSIS_OUT env variable doesn't exist" << endl;
-			string outFile = outFolder + outFileName; 
+				return;
+			}
+
+			disabled=0;
+			string outFile = outFolder + fileName; 
 			cout << "OPENED FILE " << outFile << endl;
 			*outStreamPtr = new ofstream();
 			(*outStreamPtr)->open(outFile);
@@ -65,6 +69,7 @@ class BufferedWriter{
 			otherBuffersSameFile[0] = this;
 		}
 		else{
+			disabled=0;
 			for(int i=0; i < MAX_NUM_OF_THREADS; i++){
 				if(otherBuffersSameFile[i]!=NULL){
 					continue;
@@ -106,19 +111,41 @@ class BufferedWriter{
     }
 };
 
-static pthread_mutex_t vpt_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t cge_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t vptMutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t cgeMutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t otherMutex = PTHREAD_MUTEX_INITIALIZER;
+
 static ofstream* vptFile = NULL;
 static ofstream* cgeFile = NULL;
-static int numOfThreads = 0;
+static ofstream* otherFile = NULL;
+
+
 static BufferedWriter* vptBufferArray[MAX_NUM_OF_THREADS];
-thread_local static BufferedWriter vptBuffer(&vpt_mutex, &vptFile, "/liveVPT.csv", vptBufferArray);
+static BufferedWriter* cgeBufferArray[MAX_NUM_OF_THREADS];
+static BufferedWriter* otherBufferArray[MAX_NUM_OF_THREADS];
+
+
+thread_local static BufferedWriter vptBuffer(&vptMutex, &vptFile, "/liveVPT.csv", vptBufferArray);
+thread_local static BufferedWriter cgeBuffer(&cgeMutex, &cgeFile, "/liveCGE.csv", cgeBufferArray);
+thread_local static BufferedWriter otherBuffer(&otherMutex, &otherFile, "/liveOTher.csv", otherBufferArray);
 
 extern "C" {
 
 	int32_t logVPT(int32_t hctx, const char *val, int32_t ctx, const char *var) {
-		string stringToAppend = to_string(hctx) + "\t" + val + "\t" + to_string(ctx) + "\t" + var + "\n";
+		string stringToAppend = to_string(hctx) + '\t' + val + '\t' + to_string(ctx) + '\t' + var + '\n';
 		vptBuffer.addString(stringToAppend);
+		return 0;
+	}
+
+	int32_t logCGE(int32_t callerCtx, const char *invo, int32_t calleeCtx, const char *toMeth) {
+		string stringToAppend = to_string(callerCtx) + '\t' + invo + '\t' + to_string(calleeCtx) + '\t' + toMeth + '\n';
+		cgeBuffer.addString(stringToAppend);
+		return 0;
+	}
+
+	int32_t logOther(const char *otherStr) {
+		string stringToAppend = otherStr + '\n';
+		cgeBuffer.addString(stringToAppend);
 		return 0;
 	}
 
