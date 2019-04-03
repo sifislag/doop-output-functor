@@ -1,4 +1,4 @@
-Souffle functor to support live output for the most basic of [Doop's](https://bitbucket.org/yanniss/doop/src/master/) analysis results.  
+Souffle [functor](https://souffle-lang.github.io/docs/functors/) to support live output for the most basic of [Doop's](https://bitbucket.org/yanniss/doop/src/master/) analysis results.  
 
 Currently outputting VarPointsTo, CallGraphEdge and "other"(general purpose) with the following declarations.
 
