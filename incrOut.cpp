@@ -145,7 +145,7 @@ extern "C" {
 
 	int32_t logOther(const char *otherStr) {
 		string stringToAppend = otherStr + '\n';
-		cgeBuffer.addString(stringToAppend);
+		otherBuffer.addString(stringToAppend);
 		return 0;
 	}
 
