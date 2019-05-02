@@ -6,19 +6,26 @@
 #include <fstream>
 #include <pthread.h>
 #include <thread>
+#include <set>
+#include <unordered_map>
+#include <iterator>
+#include <sstream>
 
 using std::ofstream;
 using std::cout;
 using std::endl;
 using std::string;
 using std::to_string;
+using std::set;
+using std::unordered_map;
+using std::pair;
 
 #define BUFFER_SIZE 4096
 #define MAX_NUM_OF_THREADS 32
 
 class BufferedWriter{
   public:  
-    char buffer[BUFFER_SIZE];
+    char *buffer;
     int charsInBuffer = 0;
     //string outFileName;
     ofstream** outStreamPtr;
@@ -26,12 +33,14 @@ class BufferedWriter{
     BufferedWriter** otherBuffersSameFile;
     int disabled;
 
-    BufferedWriter(pthread_mutex_t* mut, ofstream** streamPtr, string fileName, BufferedWriter** bufferArr){
-    	cout << "MY CONSTRUCTOR FROM " <<  std::this_thread::get_id() << endl;
+    BufferedWriter(pthread_mutex_t* mut, ofstream** streamPtr, string fileName, BufferedWriter** bufferArr, int bufferSize){
+    	cout << "MY CONSTRUCTOR " + fileName + " FROM " <<  std::this_thread::get_id() << endl;
     	disabled = 1;
     	myMutex = mut;
     	outStreamPtr = streamPtr;
     	otherBuffersSameFile = bufferArr;
+    	buffer = (char*)malloc(sizeof(char) * bufferSize);
+    	buffer[0] = '\0';
     	initFile(fileName);
     }
 
@@ -45,7 +54,6 @@ class BufferedWriter{
 			if(otherBuffersSameFile[i]!=NULL)
 				otherBuffersSameFile[i]->flush();
 		
-		//if(--numOfThreads == 0)
 		(*outStreamPtr)->close();
 		
 		pthread_mutex_unlock(myMutex);
@@ -65,7 +73,6 @@ class BufferedWriter{
 			cout << "OPENED FILE " << outFile << endl;
 			*outStreamPtr = new ofstream();
 			(*outStreamPtr)->open(outFile);
-			//numOfThreads = 1;
 			otherBuffersSameFile[0] = this;
 		}
 		else{
@@ -111,23 +118,67 @@ class BufferedWriter{
     }
 };
 
-static pthread_mutex_t vptMutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t cgeMutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t otherMutex = PTHREAD_MUTEX_INITIALIZER;
+class RelationEntry{
+  public:	
+	string relName;
+	ofstream* fileStream;
+	pthread_mutex_t relMutex;
+	BufferedWriter* bufferArray[MAX_NUM_OF_THREADS];
 
-static ofstream* vptFile = NULL;
-static ofstream* cgeFile = NULL;
-static ofstream* otherFile = NULL;
+	RelationEntry(string name){
+		relName = name;
+		fileStream = NULL;
+		for(int i=0; i < MAX_NUM_OF_THREADS; i++)
+			bufferArray[i]=NULL;			
+		//relMutex = PTHREAD_MUTEX_INITIALIZER;
+		int rc = pthread_mutex_init(&relMutex, NULL);
+		if(rc != 0){
+			cout << "Mutex initialization failed." << endl;
+		}
+	}
+
+	bool operator< (const RelationEntry & rel) const{
+		return this-> relName < rel.relName;
+	}
+
+};
+
+struct RelEntryPtrComp
+{
+    bool operator()(const RelationEntry* lhs, const RelationEntry* rhs) const  { 
+    	return lhs->relName < rhs->relName;
+    }
+};
+
+static pthread_mutex_t globMutex = PTHREAD_MUTEX_INITIALIZER;
+
+static RelationEntry liveVPTEntry("liveVPT");
+static RelationEntry liveCGEEntry("liveCGE");
+static RelationEntry liveFPTEntry("liveFPT");
+
+static unordered_map<string, RelationEntry*> outputRelations{
+	pair<string, RelationEntry*>("liveVPT", &liveVPTEntry), 
+	pair<string, RelationEntry*>("liveCGE",&liveCGEEntry), 
+	pair<string, RelationEntry*>("liveFPT", &liveFPTEntry)
+};
+
+thread_local static unordered_map<string, BufferedWriter*> threadsBuffers;
+
+thread_local static BufferedWriter vptBuffer(&(liveVPTEntry.relMutex),&(liveVPTEntry.fileStream), "/"+liveVPTEntry.relName+".csv", liveVPTEntry.bufferArray, BUFFER_SIZE);
+thread_local static BufferedWriter cgeBuffer(&(liveCGEEntry.relMutex),&(liveCGEEntry.fileStream), "/"+liveCGEEntry.relName+".csv", liveCGEEntry.bufferArray, BUFFER_SIZE);
+thread_local static BufferedWriter fptBuffer(&(liveFPTEntry.relMutex),&(liveFPTEntry.fileStream), "/"+liveFPTEntry.relName+".csv", liveFPTEntry.bufferArray, BUFFER_SIZE);
 
 
-static BufferedWriter* vptBufferArray[MAX_NUM_OF_THREADS];
-static BufferedWriter* cgeBufferArray[MAX_NUM_OF_THREADS];
-static BufferedWriter* otherBufferArray[MAX_NUM_OF_THREADS];
+    void fflushAllBuffers(){
+    	unordered_map<string, RelationEntry*>::iterator itr;
+	    for (itr = outputRelations.begin(); itr != outputRelations.end(); ++itr) {
+	    	RelationEntry* entry = itr->second;
+	    	for(int i=0; i < MAX_NUM_OF_THREADS; i++)
+				if(entry->bufferArray[i]!=NULL)
+					entry->bufferArray[i]->flush();
+	    }
+    }
 
-
-thread_local static BufferedWriter vptBuffer(&vptMutex, &vptFile, "/liveVPT.csv", vptBufferArray);
-thread_local static BufferedWriter cgeBuffer(&cgeMutex, &cgeFile, "/liveCGE.csv", cgeBufferArray);
-thread_local static BufferedWriter otherBuffer(&otherMutex, &otherFile, "/liveOTher.csv", otherBufferArray);
 
 extern "C" {
 
@@ -143,9 +194,35 @@ extern "C" {
 		return 0;
 	}
 
-	int32_t logOther(const char *otherStr) {
+	int32_t logFPT(const char *otherStr) {
 		string stringToAppend = otherStr + '\n';
-		otherBuffer.addString(stringToAppend);
+		fptBuffer.addString(stringToAppend);
+		return 0;
+	}
+
+	int32_t logRel(const char *liveRel, const char *otherStr) {
+		auto relBuffer = threadsBuffers.find(liveRel); 
+		if(relBuffer == threadsBuffers.end()){
+			auto relEntry = outputRelations.find(liveRel);
+			if(relEntry == outputRelations.end()){
+				pthread_mutex_lock(&globMutex);
+				outputRelations.insert(pair<string, RelationEntry*>(liveRel, new RelationEntry(liveRel)));
+				relEntry = outputRelations.find(liveRel);
+				//cout << "Adding new relation: " << liveRel << endl;
+				pthread_mutex_unlock(&globMutex);
+			}
+			//cout << "Adding new relation: " << liveRel << " in thread " << std::this_thread::get_id() << endl;
+			threadsBuffers.insert(pair<string, BufferedWriter*>(liveRel, new BufferedWriter(&(relEntry->second->relMutex),&(relEntry->second->fileStream), "/"+relEntry->second->relName+".csv", relEntry->second->bufferArray, BUFFER_SIZE)));
+			relBuffer = threadsBuffers.find(liveRel);
+		}
+		string stringToAppend = otherStr;
+		relBuffer->second->addString(stringToAppend+ "\n");
+		fptBuffer.addString(stringToAppend);
+		return 0;
+	}
+
+	int32_t registerAtExitFunction(int32_t callerCtx){
+		atexit(fflushAllBuffers);
 		return 0;
 	}
 
